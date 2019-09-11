@@ -1,4 +1,3 @@
-[![Deploy to now](https://deploy.now.sh/static/button.svg)](https://deploy.now.sh/?repo=https://github.com/zeit/next.js/tree/master/examples/with-cookie-auth)
 # Example app utilizing cookie-based authentication
 
 ## How to use
@@ -21,12 +20,17 @@ curl https://codeload.github.com/zeit/next.js/tar.gz/canary | tar -xz --strip=2 
 cd with-cookie-auth
 ```
 
-Install it and run:
+### Run locally
+
+After you clone the repository you can install the dependencies, run `yarn dev` and start hacking! You'll be able to see the application running locally as if it were deployed.
 
 ```bash
-npm install
-npm run dev
+$ cd with-cookie-auth
+$ (with-cookie-auth/) yarn install
+$ (with-cookie-auth/) yarn dev
 ```
+
+### Deploy
 
 Deploy it to the cloud with [now](https://zeit.co/now) ([download](https://zeit.co/download))
 
@@ -40,8 +44,8 @@ In this example, we authenticate users and store a token in a cookie. The exampl
 
 This example is backend agnostic and uses [isomorphic-unfetch](https://www.npmjs.com/package/isomorphic-unfetch) to do the API calls on the client and the server.
 
-The repo includes a minimal passwordless backend built with [Micro](https://www.npmjs.com/package/micro) and it logs the user in with a GitHub username and saves the user id from the API call as token. 
+The repo includes a minimal passwordless backend built with the new [API Routes support](https://github.com/zeit/next.js/pull/7296) (`pages/api`), [Micro](https://www.npmjs.com/package/micro) and the [GitHub API](https://developer.github.com/v3/). The backend allows the user to log in with their GitHub username.
 
-Session is syncronized across tabs. If you logout your session gets logged out on all the windows as well. We use the HOC `withAuthSync` for this.
+Session is synchronized across tabs. If you logout your session gets removed on all the windows as well. We use the HOC `withAuthSync` for this.
 
 The helper function `auth` helps to retrieve the token across pages and redirects the user if not token was found.

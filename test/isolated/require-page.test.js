@@ -1,12 +1,23 @@
 /* eslint-env jest */
 
 import { join } from 'path'
-import {SERVER_DIRECTORY, CLIENT_STATIC_FILES_PATH} from 'next-server/constants'
-import {requirePage, getPagePath, normalizePagePath, pageNotFoundError} from 'next-server/dist/server/require'
+import { SERVER_DIRECTORY, CLIENT_STATIC_FILES_PATH } from 'next/constants'
+import {
+  requirePage,
+  getPagePath,
+  pageNotFoundError
+} from 'next/dist/next-server/server/require'
+import { normalizePagePath } from 'next/dist/next-server/server/normalize-page-path'
 
 const sep = '/'
 const distDir = join(__dirname, '_resolvedata')
-const pathToBundles = join(distDir, SERVER_DIRECTORY, CLIENT_STATIC_FILES_PATH, 'development', 'pages')
+const pathToBundles = join(
+  distDir,
+  SERVER_DIRECTORY,
+  CLIENT_STATIC_FILES_PATH,
+  'development',
+  'pages'
+)
 
 describe('pageNotFoundError', () => {
   it('Should throw error with ENOENT code', () => {

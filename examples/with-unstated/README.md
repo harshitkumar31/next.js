@@ -1,5 +1,3 @@
-[![Deploy to now](https://deploy.now.sh/static/button.svg)](https://deploy.now.sh/?repo=https://github.com/zeit/next.js/tree/canary/examples/with-unstated)
-
 # Unstated example
 
 ## How to use
@@ -43,5 +41,4 @@ now
 
 This example shows how to integrate Unstated in Next.js. For more info about Unstated you can visit [here](https://github.com/jamiebuilds/unstated). The example is basically same as [redux example](https://github.com/zeit/next.js/tree/canary/examples/with-redux).
 
-This example also shows how to share state within different page, you can expect the same state for Counter when switching between Index and About.
-
+The "counter" shows you how to preserve state from server to client and share the state within different page, you can expect the same state for "counter" when switching between Index and About page, observe that "counter" behaves differently from the "clock" example.

@@ -1,21 +1,14 @@
 import React from 'react'
-import ansiHTML from 'ansi-html'
-import Head from 'next-server/head'
+import Head from '../next-server/lib/head'
 
-// This component is rendered through dev-error-overlay on the client side.
-// On the server side it's rendered directly
-export default function ErrorDebug ({error, info}) {
-  const { name, message } = error
+// This component is only rendered on the server side.
+export default function ErrorDebug ({ error, info }) {
   return (
     <div style={styles.errorDebug}>
       <Head>
         <meta name='viewport' content='width=device-width, initial-scale=1.0' />
       </Head>
-      {
-        name === 'ModuleBuildError' && message
-          ? <pre style={styles.stack} dangerouslySetInnerHTML={{ __html: ansiHTML(encodeHtml(message)) }} />
-          : <StackTrace error={error} info={info} />
-      }
+      <StackTrace error={error} info={info} />
     </div>
   )
 }
@@ -23,12 +16,8 @@ export default function ErrorDebug ({error, info}) {
 const StackTrace = ({ error: { name, message, stack }, info }) => (
   <div>
     <div style={styles.heading}>{message || name}</div>
-    <pre style={styles.stack}>
-      {stack}
-    </pre>
-    {info && <pre style={styles.stack}>
-      {info.componentStack}
-    </pre>}
+    <pre style={styles.stack}>{stack}</pre>
+    {info && <pre style={styles.stack}>{info.componentStack}</pre>}
   </div>
 )
 
@@ -48,7 +37,8 @@ export const styles = {
   },
 
   stack: {
-    fontFamily: '"SF Mono", "Roboto Mono", "Fira Mono", consolas, menlo-regular, monospace',
+    fontFamily:
+      '"SF Mono", "Roboto Mono", "Fira Mono", consolas, menlo-regular, monospace',
     fontSize: '13px',
     lineHeight: '18px',
     color: '#777',
@@ -59,7 +49,8 @@ export const styles = {
   },
 
   heading: {
-    fontFamily: '-apple-system, system-ui, BlinkMacSystemFont, Roboto, "Segoe UI", "Fira Sans", Avenir, "Helvetica Neue", "Lucida Grande", sans-serif',
+    fontFamily:
+      '-apple-system, system-ui, BlinkMacSystemFont, Roboto, "Segoe UI", "Fira Sans", Avenir, "Helvetica Neue", "Lucida Grande", sans-serif',
     fontSize: '20px',
     fontWeight: '400',
     lineHeight: '28px',
@@ -68,21 +59,3 @@ export const styles = {
     marginTop: '0px'
   }
 }
-
-const encodeHtml = str => {
-  return str.replace(/</g, '&lt;').replace(/>/g, '&gt;')
-}
-
-// see color definitions of babel-code-frame:
-// https://github.com/babel/babel/blob/master/packages/babel-code-frame/src/index.js
-
-ansiHTML.setColors({
-  reset: ['6F6767', '0e0d0d'],
-  darkgrey: '6F6767',
-  yellow: '6F6767',
-  green: 'ebe7e5',
-  magenta: 'ebe7e5',
-  blue: 'ebe7e5',
-  cyan: 'ebe7e5',
-  red: 'ff001f'
-})

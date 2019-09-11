@@ -1,15 +1,29 @@
-import del from 'del'
 import { cpus } from 'os'
-import { fork } from 'child_process'
-import cp from 'recursive-copy'
-import mkdirp from 'mkdirp-then'
+import chalk from 'chalk'
+import Worker from 'jest-worker'
+import { promisify } from 'util'
+import mkdirpModule from 'mkdirp'
 import { resolve, join } from 'path'
+import { API_ROUTE } from '../lib/constants'
 import { existsSync, readFileSync } from 'fs'
-import loadConfig from 'next-server/next-config'
-import { PHASE_EXPORT, SERVER_DIRECTORY, PAGES_MANIFEST, CONFIG_FILE, BUILD_ID_FILE, CLIENT_STATIC_FILES_PATH } from 'next-server/constants'
-import { setAssetPrefix } from 'next-server/asset'
-import * as envConfig from 'next-server/config'
 import createProgress from 'tty-aware-progress'
+import { recursiveCopy } from '../lib/recursive-copy'
+import { recursiveDelete } from '../lib/recursive-delete'
+import { formatAmpMessages } from '../build/output/index'
+import loadConfig, {
+  isTargetLikeServerless
+} from '../next-server/server/config'
+import {
+  PHASE_EXPORT,
+  SERVER_DIRECTORY,
+  PAGES_MANIFEST,
+  CONFIG_FILE,
+  BUILD_ID_FILE,
+  CLIENT_PUBLIC_FILES_PATH,
+  CLIENT_STATIC_FILES_PATH
+} from '../next-server/lib/constants'
+
+const mkdirp = promisify(mkdirpModule)
 
 export default async function (dir, options, configuration) {
   function log (message) {
@@ -19,30 +33,41 @@ export default async function (dir, options, configuration) {
 
   dir = resolve(dir)
   const nextConfig = configuration || loadConfig(PHASE_EXPORT, dir)
-  const concurrency = options.concurrency || 10
   const threads = options.threads || Math.max(cpus().length - 1, 1)
   const distDir = join(dir, nextConfig.distDir)
+  const subFolders = nextConfig.exportTrailingSlash
+
+  if (!options.buildExport && nextConfig.target !== 'server') {
+    throw new Error(
+      'Cannot export when target is not server. https://err.sh/zeit/next.js/next-export-serverless'
+    )
+  }
 
   log(`> using build directory: ${distDir}`)
 
   if (!existsSync(distDir)) {
-    throw new Error(`Build directory ${distDir} does not exist. Make sure you run "next build" before running "next start" or "next export".`)
+    throw new Error(
+      `Build directory ${distDir} does not exist. Make sure you run "next build" before running "next start" or "next export".`
+    )
   }
 
   const buildId = readFileSync(join(distDir, BUILD_ID_FILE), 'utf8')
-  const pagesManifest = require(join(distDir, SERVER_DIRECTORY, PAGES_MANIFEST))
+  const pagesManifest =
+    !options.pages && require(join(distDir, SERVER_DIRECTORY, PAGES_MANIFEST))
 
-  const pages = Object.keys(pagesManifest)
+  const pages = options.pages || Object.keys(pagesManifest)
   const defaultPathMap = {}
 
   for (const page of pages) {
-    // _document and _app are not real pages.
-    if (page === '/_document' || page === '/_app') {
-      continue
-    }
-
-    if (page === '/_error') {
-      defaultPathMap['/404.html'] = { page }
+    // _document and _app are not real pages
+    // _error is exported as 404.html later on
+    // API Routes are Node.js functions
+    if (
+      page === '/_document' ||
+      page === '/_app' ||
+      page === '/_error' ||
+      page.match(API_ROUTE)
+    ) {
       continue
     }
 
@@ -51,23 +76,19 @@ export default async function (dir, options, configuration) {
 
   // Initialize the output directory
   const outDir = options.outdir
-  await del(join(outDir, '*'))
+  await recursiveDelete(join(outDir))
   await mkdirp(join(outDir, '_next', buildId))
 
   // Copy static directory
   if (existsSync(join(dir, 'static'))) {
     log('  copying "static" directory')
-    await cp(
-      join(dir, 'static'),
-      join(outDir, 'static'),
-      { expand: true }
-    )
+    await recursiveCopy(join(dir, 'static'), join(outDir, 'static'))
   }
 
   // Copy .next/static directory
   if (existsSync(join(distDir, CLIENT_STATIC_FILES_PATH))) {
     log('  copying "static build" directory')
-    await cp(
+    await recursiveCopy(
       join(distDir, CLIENT_STATIC_FILES_PATH),
       join(outDir, '_next', CLIENT_STATIC_FILES_PATH)
     )
@@ -75,8 +96,10 @@ export default async function (dir, options, configuration) {
 
   // Get the exportPathMap from the config file
   if (typeof nextConfig.exportPathMap !== 'function') {
-    console.log(`> No "exportPathMap" found in "${CONFIG_FILE}". Generating map from "./pages"`)
-    nextConfig.exportPathMap = async (defaultMap) => {
+    console.log(
+      `> No "exportPathMap" found in "${CONFIG_FILE}". Generating map from "./pages"`
+    )
+    nextConfig.exportPathMap = async defaultMap => {
       return defaultMap
     }
   }
@@ -90,73 +113,123 @@ export default async function (dir, options, configuration) {
     distDir,
     dev: false,
     staticMarkup: false,
-    hotReloader: null
+    hotReloader: null,
+    canonicalBase: (nextConfig.amp && nextConfig.amp.canonicalBase) || '',
+    isModern: nextConfig.experimental.modern
   }
 
-  const {serverRuntimeConfig, publicRuntimeConfig} = nextConfig
+  const { serverRuntimeConfig, publicRuntimeConfig } = nextConfig
 
-  if (publicRuntimeConfig) {
+  if (Object.keys(publicRuntimeConfig).length > 0) {
     renderOpts.runtimeConfig = publicRuntimeConfig
   }
-
-  envConfig.setConfig({
-    serverRuntimeConfig,
-    publicRuntimeConfig
-  })
-
-  // set the assetPrefix to use for 'next/asset'
-  setAssetPrefix(renderOpts.assetPrefix)
 
   // We need this for server rendering the Link component.
   global.__NEXT_DATA__ = {
     nextExport: true
   }
 
-  log(`  launching ${threads} threads with concurrency of ${concurrency} per thread`)
-  const exportPathMap = await nextConfig.exportPathMap(defaultPathMap, {dev: false, dir, outDir, distDir, buildId})
-  const exportPaths = Object.keys(exportPathMap)
-
-  const progress = !options.silent && createProgress(exportPaths.length)
-
-  const chunks = exportPaths.reduce((result, route, i) => {
-    const worker = i % threads
-    if (!result[worker]) {
-      result[worker] = { paths: [], pathMap: {} }
+  log(`  launching ${threads} workers`)
+  const exportPathMap = await nextConfig.exportPathMap(defaultPathMap, {
+    dev: false,
+    dir,
+    outDir,
+    distDir,
+    buildId
+  })
+  if (!exportPathMap['/404']) {
+    exportPathMap['/404.html'] = exportPathMap['/404.html'] || {
+      page: '/_error'
     }
-    result[worker].pathMap[route] = exportPathMap[route]
-    result[worker].paths.push(route)
-    return result
-  }, [])
+  }
+  const exportPaths = Object.keys(exportPathMap)
+  const filteredPaths = exportPaths.filter(
+    // Remove API routes
+    route => !exportPathMap[route].page.match(API_ROUTE)
+  )
+  const hasApiRoutes = exportPaths.length !== filteredPaths.length
+
+  // Warn if the user defines a path for an API page
+  if (hasApiRoutes) {
+    log(
+      chalk.yellow(
+        '  API pages are not supported by next export. https://err.sh/zeit/next.js/api-routes-static-export'
+      )
+    )
+  }
+
+  const progress = !options.silent && createProgress(filteredPaths.length)
+
+  const ampValidations = {}
+  let hadValidationError = false
+
+  const publicDir = join(dir, CLIENT_PUBLIC_FILES_PATH)
+  // Copy public directory
+  if (
+    nextConfig.experimental &&
+    nextConfig.experimental.publicDirectory &&
+    existsSync(publicDir)
+  ) {
+    log('  copying "public" directory')
+    await recursiveCopy(publicDir, outDir, {
+      filter (path) {
+        // Exclude paths used by pages
+        return !exportPathMap[path]
+      }
+    })
+  }
+
+  const worker = new Worker(require.resolve('./worker'), {
+    maxRetries: 0,
+    numWorkers: threads,
+    enableWorkerThreads: true,
+    exposedMethods: ['default']
+  })
+
+  worker.getStdout().pipe(process.stdout)
+  worker.getStderr().pipe(process.stderr)
+
+  let renderError = false
 
   await Promise.all(
-    chunks.map(
-      chunk =>
-        new Promise((resolve, reject) => {
-          const worker = fork(require.resolve('./worker'), [], {
-            env: process.env
-          })
-          worker.send({
-            distDir,
-            buildId,
-            exportPaths: chunk.paths,
-            exportPathMap: chunk.pathMap,
-            outDir,
-            renderOpts,
-            concurrency
-          })
-          worker.on('message', ({ type, payload }) => {
-            if (type === 'progress' && progress) {
-              progress()
-            } else if (type === 'error') {
-              reject(payload)
-            } else if (type === 'done') {
-              resolve()
-            }
-          })
-        })
-    )
+    filteredPaths.map(async path => {
+      const result = await worker.default({
+        path,
+        pathMap: exportPathMap[path],
+        distDir,
+        buildId,
+        outDir,
+        renderOpts,
+        serverRuntimeConfig,
+        subFolders,
+        serverless: isTargetLikeServerless(nextConfig.target)
+      })
+
+      for (const validation of result.ampValidations || []) {
+        const { page, result } = validation
+        ampValidations[page] = result
+        hadValidationError |=
+          Array.isArray(result && result.errors) && result.errors.length > 0
+      }
+      renderError |= result.error
+      if (progress) progress()
+    })
   )
 
+  worker.end()
+
+  if (Object.keys(ampValidations).length) {
+    console.log(formatAmpMessages(ampValidations))
+  }
+  if (hadValidationError) {
+    throw new Error(
+      `AMP Validation caused the export to fail. https://err.sh/zeit/next.js/amp-export-validation`
+    )
+  }
+
+  if (renderError) {
+    throw new Error(`Export encountered errors`)
+  }
   // Add an empty line to the console for the better readability.
   log('')
 }

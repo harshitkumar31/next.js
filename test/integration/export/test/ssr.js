@@ -9,6 +9,11 @@ export default function (context) {
       expect(html).toMatch(/This is the home page/)
     })
 
+    it('should render the about page', async () => {
+      const html = await renderViaHTTP(context.port, '/about')
+      expect(html).toMatch(/This is the About page foobar/)
+    })
+
     it('should render links correctly', async () => {
       const html = await renderViaHTTP(context.port, '/')
       const $ = cheerio.load(html)
@@ -39,24 +44,47 @@ export default function (context) {
     })
 
     it('should give empty object for query if there is no query', async () => {
-      const html = await renderViaHTTP(context.port, '/get-initial-props-with-no-query')
+      const html = await renderViaHTTP(
+        context.port,
+        '/get-initial-props-with-no-query'
+      )
       expect(html).toMatch(/Query is: {}/)
     })
 
-    it('should handle next/asset properly', async () => {
-      const html = await renderViaHTTP(context.port, '/asset')
-      const $ = cheerio.load(html)
-      expect($('img').attr('src')).toBe('/static/myimage.png')
-    })
-
-    it('should render _error on 404', async () => {
-      const html = await renderViaHTTP(context.port, '/404')
-      expect(html).toMatch(/404/)
-    })
-
-    it('should export 404.html instead of 404/index.html', async () => {
+    it('should render _error on 404.html even if not provided in exportPathMap', async () => {
       const html = await renderViaHTTP(context.port, '/404.html')
-      expect(html).toMatch(/404/)
+      // The default error page from the test server
+      // contains "404", so need to be specific here
+      expect(html).toMatch(/404.*page.*not.*found/i)
+    })
+
+    it('should not render _error on /404/index.html', async () => {
+      const html = await renderViaHTTP(context.port, '/404/index.html')
+      // The default error page from the test server
+      // contains "404", so need to be specific here
+      expect(html).not.toMatch(/404.*page.*not.*found/i)
+    })
+
+    it('Should serve static files', async () => {
+      const data = await renderViaHTTP(context.port, '/static/data/item.txt')
+      expect(data).toBe('item')
+    })
+
+    it('Should serve public files and prioritize pages', async () => {
+      const html = await renderViaHTTP(context.port, '/about')
+      const html2 = await renderViaHTTP(context.port, '/query')
+      const data = await renderViaHTTP(context.port, '/about/data.txt')
+      expect(html).toMatch(/This is the About page foobar/)
+      expect(html2).toMatch(/{"a":"blue"}/)
+      expect(data).toBe('data')
+    })
+
+    it('Should render dynamic files with query', async () => {
+      const html = await renderViaHTTP(
+        context.port,
+        '/blog/nextjs/comment/test'
+      )
+      expect(html).toMatch(/Blog post nextjs comment test/)
     })
   })
 }

@@ -1,37 +1,20 @@
 import React from 'react'
-import Plain from 'slate-plain-serializer'
-import { Editor } from 'slate-react'
-import { KeyUtils } from 'slate'
+import Link from 'next/link'
+import NextEditor from '../components/NextEditor'
 
-class Index extends React.Component {
-  constructor (props) {
-    super(props)
-
-    // In order to allow ssr we need to reset the key
-    // generating function to its initial state.
-    KeyUtils.resetGenerator()
-
-    // Deserialize the initial editor value.
-    this.state = {
-      value: Plain.deserialize(
-        'This is editable plain text, just like a <textarea>!'
-      )
-    }
-  }
-
-  render () {
-    return (
-      <Editor
-        placeholder='Enter some plain text...'
-        value={this.state.value}
-        onChange={this.onChange}
+const IndexPage = props => {
+  return (
+    <React.Fragment>
+      <Link href='/multiple'>
+        <a>Go to multiple</a>
+      </Link>
+      <hr />
+      <NextEditor
+        slateKey='someUniqueKey'
+        defaultValue='This is editable plain text, just like a <textarea>!'
       />
-    )
-  }
-
-  onChange = ({ value }) => {
-    this.setState({ value })
-  }
+    </React.Fragment>
+  )
 }
 
-export default Index
+export default IndexPage

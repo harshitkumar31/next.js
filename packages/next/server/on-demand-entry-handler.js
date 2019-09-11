@@ -1,42 +1,41 @@
 import DynamicEntryPlugin from 'webpack/lib/DynamicEntryPlugin'
 import { EventEmitter } from 'events'
-import { join } from 'path'
-import fs from 'fs'
-import promisify from '../lib/promisify'
-import globModule from 'glob'
-import {normalizePagePath, pageNotFoundError} from 'next-server/dist/server/require'
-import {createEntry} from '../build/webpack/utils'
-import { ROUTE_NAME_REGEX, IS_BUNDLED_PAGE_REGEX } from 'next-server/constants'
+import { join, posix } from 'path'
+import { parse } from 'url'
+import { pageNotFoundError } from '../next-server/server/require'
+import { normalizePagePath } from '../next-server/server/normalize-page-path'
+import {
+  ROUTE_NAME_REGEX,
+  IS_BUNDLED_PAGE_REGEX
+} from '../next-server/lib/constants'
+import { stringify } from 'querystring'
+import { findPageFile } from './lib/find-page-file'
+import { isWriteable } from '../build/is-writeable'
+import * as Log from '../build/output/log'
+import { API_ROUTE } from '../lib/constants'
 
 const ADDED = Symbol('added')
 const BUILDING = Symbol('building')
 const BUILT = Symbol('built')
 
-const glob = promisify(globModule)
-const access = promisify(fs.access)
-
 // Based on https://github.com/webpack/webpack/blob/master/lib/DynamicEntryPlugin.js#L29-L37
 function addEntry (compilation, context, name, entry) {
   return new Promise((resolve, reject) => {
     const dep = DynamicEntryPlugin.createDependency(entry, name)
-    compilation.addEntry(context, dep, name, (err) => {
+    compilation.addEntry(context, dep, name, err => {
       if (err) return reject(err)
       resolve()
     })
   })
 }
 
-export default function onDemandEntryHandler (devMiddleware, multiCompiler, {
-  buildId,
-  dir,
-  dev,
-  reload,
-  pageExtensions,
-  maxInactiveAge = 1000 * 60,
-  pagesBufferLength = 2,
-  wsPort
-}) {
-  const {compilers} = multiCompiler
+export default function onDemandEntryHandler (
+  devMiddleware,
+  multiCompiler,
+  { buildId, dir, reload, pageExtensions, maxInactiveAge, pagesBufferLength }
+) {
+  const pagesDir = join(dir, 'pages')
+  const { compilers } = multiCompiler
   const invalidator = new Invalidator(devMiddleware, multiCompiler)
   let entries = {}
   let lastAccessPages = ['']
@@ -44,39 +43,45 @@ export default function onDemandEntryHandler (devMiddleware, multiCompiler, {
   let reloading = false
   let stopped = false
   let reloadCallbacks = new EventEmitter()
+  let lastEntry = null
 
   for (const compiler of compilers) {
-    compiler.hooks.make.tapPromise('NextJsOnDemandEntries', (compilation) => {
+    compiler.hooks.make.tapPromise('NextJsOnDemandEntries', compilation => {
       invalidator.startBuilding()
 
-      const allEntries = Object.keys(entries).map(async (page) => {
-        const { name, entry } = entries[page]
-        const files = Array.isArray(entry) ? entry : [entry]
-        // Is just one item. But it's passed as an array.
-        for (const file of files) {
-          try {
-            await access(join(dir, file), (fs.constants || fs).W_OK)
-          } catch (err) {
-            console.warn('Page was removed', page)
-            delete entries[page]
-            return
-          }
+      const allEntries = Object.keys(entries).map(async page => {
+        if (compiler.name === 'client' && page.match(API_ROUTE)) {
+          return
         }
+        const { name, absolutePagePath } = entries[page]
+        const pageExists = await isWriteable(absolutePagePath)
+        if (!pageExists) {
+          Log.event('page was removed', page)
+          delete entries[page]
+          return
+        }
+
         entries[page].status = BUILDING
-        return addEntry(compilation, compiler.context, name, entry)
+        return addEntry(compilation, compiler.context, name, [
+          compiler.name === 'client'
+            ? `next-client-pages-loader?${stringify({
+              page,
+              absolutePagePath
+            })}!`
+            : absolutePagePath
+        ])
       })
 
-      return Promise.all(allEntries)
+      return Promise.all(allEntries).catch(err => console.error(err))
     })
   }
 
-  multiCompiler.hooks.done.tap('NextJsOnDemandEntries', (multiStats) => {
-    const clientStats = multiStats.stats[0]
-    const { compilation } = clientStats
-    const hardFailedPages = compilation.errors
+  function findHardFailedPages (errors) {
+    return errors
       .filter(e => {
         // Make sure to only pick errors which marked with missing modules
-        const hasNoModuleFoundError = /ENOENT/.test(e.message) || /Module not found/.test(e.message)
+        const hasNoModuleFoundError =
+          /ENOENT/.test(e.message) || /Module not found/.test(e.message)
         if (!hasNoModuleFoundError) return false
 
         // The page itself is missing. So this is a failed page.
@@ -92,9 +97,11 @@ export default function onDemandEntryHandler (devMiddleware, multiCompiler, {
         const pageName = ROUTE_NAME_REGEX.exec(c.name)[1]
         return normalizePage(`/${pageName}`)
       })
+  }
 
-    // compilation.entrypoints is a Map object, so iterating over it 0 is the key and 1 is the value
-    for (const [, entrypoint] of compilation.entrypoints.entries()) {
+  function getPagePathsFromEntrypoints (entrypoints) {
+    const pagePaths = []
+    for (const [, entrypoint] of entrypoints.entries()) {
       const result = ROUTE_NAME_REGEX.exec(entrypoint.name)
       if (!result) {
         continue
@@ -106,6 +113,27 @@ export default function onDemandEntryHandler (devMiddleware, multiCompiler, {
         continue
       }
 
+      pagePaths.push(pagePath)
+    }
+
+    return pagePaths
+  }
+
+  multiCompiler.hooks.done.tap('NextJsOnDemandEntries', multiStats => {
+    const [clientStats, serverStats] = multiStats.stats
+    const hardFailedPages = [
+      ...new Set([
+        ...findHardFailedPages(clientStats.compilation.errors),
+        ...findHardFailedPages(serverStats.compilation.errors)
+      ])
+    ]
+    const pagePaths = new Set([
+      ...getPagePathsFromEntrypoints(clientStats.compilation.entrypoints),
+      ...getPagePathsFromEntrypoints(serverStats.compilation.entrypoints)
+    ])
+
+    // compilation.entrypoints is a Map object, so iterating over it 0 is the key and 1 is the value
+    for (const pagePath of pagePaths) {
       const page = normalizePage('/' + pagePath)
 
       const entry = entries[page]
@@ -125,7 +153,11 @@ export default function onDemandEntryHandler (devMiddleware, multiCompiler, {
     invalidator.doneBuilding()
 
     if (hardFailedPages.length > 0 && !reloading) {
-      console.log(`> Reloading webpack due to inconsistant state of pages(s): ${hardFailedPages.join(', ')}`)
+      console.log(
+        `> Reloading webpack due to inconsistant state of pages(s): ${hardFailedPages.join(
+          ', '
+        )}`
+      )
       reloading = true
       reload()
         .then(() => {
@@ -143,7 +175,12 @@ export default function onDemandEntryHandler (devMiddleware, multiCompiler, {
 
   const disposeHandler = setInterval(function () {
     if (stopped) return
-    disposeInactiveEntries(devMiddleware, entries, lastAccessPages, maxInactiveAge)
+    disposeInactiveEntries(
+      devMiddleware,
+      entries,
+      lastAccessPages,
+      maxInactiveAge
+    )
   }, 5000)
 
   disposeHandler.unref()
@@ -155,10 +192,47 @@ export default function onDemandEntryHandler (devMiddleware, multiCompiler, {
     reloadCallbacks = null
   }
 
+  function handlePing (pg) {
+    const page = normalizePage(pg)
+    const entryInfo = entries[page]
+    let toSend
+
+    // If there's no entry, it may have been invalidated and needs to be re-built.
+    if (!entryInfo) {
+      if (page !== lastEntry) {
+        Log.event(`client pings, but there's no entry for page: ${page}`)
+      }
+      lastEntry = page
+      return { invalid: true }
+    }
+
+    // 404 is an on demand entry but when a new page is added we have to refresh the page
+    if (page === '/_error') {
+      toSend = { invalid: true }
+    } else {
+      toSend = { success: true }
+    }
+
+    // We don't need to maintain active state of anything other than BUILT entries
+    if (entryInfo.status !== BUILT) return
+
+    // If there's an entryInfo
+    if (!lastAccessPages.includes(page)) {
+      lastAccessPages.unshift(page)
+
+      // Maintain the buffer max length
+      if (lastAccessPages.length > pagesBufferLength) {
+        lastAccessPages.pop()
+      }
+    }
+    entryInfo.lastActiveTime = Date.now()
+    return toSend
+  }
+
   return {
     waitUntilReloaded () {
       if (!reloading) return Promise.resolve(true)
-      return new Promise((resolve) => {
+      return new Promise(resolve => {
         reloadCallbacks.once('done', function () {
           resolve()
         })
@@ -167,7 +241,6 @@ export default function onDemandEntryHandler (devMiddleware, multiCompiler, {
 
     async ensurePage (page) {
       await this.waitUntilReloaded()
-      page = normalizePage(page)
       let normalizedPagePath
       try {
         normalizedPagePath = normalizePagePath(page)
@@ -176,21 +249,37 @@ export default function onDemandEntryHandler (devMiddleware, multiCompiler, {
         throw pageNotFoundError(normalizedPagePath)
       }
 
-      const extensions = pageExtensions.join('|')
-      const paths = await glob(`pages/{${normalizedPagePath}/index,${normalizedPagePath}}.+(${extensions})`, {cwd: dir})
+      let pagePath = await findPageFile(
+        pagesDir,
+        normalizedPagePath,
+        pageExtensions
+      )
 
-      if (paths.length === 0) {
+      // Default the /_error route to the Next.js provided default page
+      if (page === '/_error' && pagePath === null) {
+        pagePath = 'next/dist/pages/_error'
+      }
+
+      if (pagePath === null) {
         throw pageNotFoundError(normalizedPagePath)
       }
 
-      const relativePathToPage = paths[0]
+      let pageUrl = `/${pagePath
+        .replace(new RegExp(`\\.+(?:${pageExtensions.join('|')})$`), '')
+        .replace(/\\/g, '/')}`.replace(/\/index$/, '')
+      pageUrl = pageUrl === '' ? '/' : pageUrl
+      const bundleFile = pageUrl === '/' ? '/index.js' : `${pageUrl}.js`
+      const name = join('static', buildId, 'pages', bundleFile)
+      const absolutePagePath = pagePath.startsWith('next/dist/pages')
+        ? require.resolve(pagePath)
+        : join(pagesDir, pagePath)
 
-      const pathname = join(dir, relativePathToPage)
+      page = posix.normalize(pageUrl)
 
-      const {name, files} = createEntry(relativePathToPage, {buildId, pageExtensions: extensions})
-
-      await new Promise((resolve, reject) => {
-        const entryInfo = entries[page]
+      return new Promise((resolve, reject) => {
+        // Makes sure the page that is being kept in on-demand-entries matches the webpack output
+        const normalizedPage = normalizePage(page)
+        const entryInfo = entries[normalizedPage]
 
         if (entryInfo) {
           if (entryInfo.status === BUILT) {
@@ -199,15 +288,15 @@ export default function onDemandEntryHandler (devMiddleware, multiCompiler, {
           }
 
           if (entryInfo.status === BUILDING) {
-            doneCallbacks.once(page, handleCallback)
+            doneCallbacks.once(normalizedPage, handleCallback)
             return
           }
         }
 
-        console.log(`> Building page: ${page}`)
+        Log.event(`build page: ${normalizedPage}`)
 
-        entries[page] = { name, entry: files, pathname, status: ADDED }
-        doneCallbacks.once(page, handleCallback)
+        entries[normalizedPage] = { name, absolutePagePath, status: ADDED }
+        doneCallbacks.once(normalizedPage, handleCallback)
 
         invalidator.invalidate()
 
@@ -216,37 +305,6 @@ export default function onDemandEntryHandler (devMiddleware, multiCompiler, {
           resolve()
         }
       })
-    },
-
-    wsConnection (ws) {
-      ws.onmessage = ({ data }) => {
-        const page = normalizePage(data)
-        const entryInfo = entries[page]
-
-        // If there's no entry.
-        // Then it seems like an weird issue.
-        if (!entryInfo) {
-          const message = `Client pings, but there's no entry for page: ${page}`
-          console.error(message)
-          return sendJson(ws, { invalid: true })
-        }
-
-        sendJson(ws, { success: true })
-
-        // We don't need to maintain active state of anything other than BUILT entries
-        if (entryInfo.status !== BUILT) return
-
-        // If there's an entryInfo
-        if (!lastAccessPages.includes(page)) {
-          lastAccessPages.unshift(page)
-
-          // Maintain the buffer max length
-          if (lastAccessPages.length > pagesBufferLength) {
-            lastAccessPages.pop()
-          }
-        }
-        entryInfo.lastActiveTime = Date.now()
-      }
     },
 
     middleware () {
@@ -261,28 +319,46 @@ export default function onDemandEntryHandler (devMiddleware, multiCompiler, {
           // Webpack config is reloading. So, we need to wait until it's done and
           // reload user's browser.
           // So the user could connect to the new handler and webpack setup.
-          this.waitUntilReloaded()
-            .then(() => {
-              res.statusCode = 302
-              res.setHeader('Location', req.url)
-              res.end('302')
-            })
+          this.waitUntilReloaded().then(() => {
+            res.statusCode = 302
+            res.setHeader('Location', req.url)
+            res.end('302')
+          })
         } else {
-          if (!/^\/_next\/on-demand-entries-ping/.test(req.url)) return next()
+          if (!/^\/_next\/webpack-hmr/.test(req.url)) return next()
 
-          res.statusCode = 200
-          res.setHeader('port', wsPort)
-          res.end('200')
+          const { query } = parse(req.url, true)
+          const page = query.page
+          if (!page) return next()
+
+          const runPing = () => {
+            const data = handlePing(query.page)
+            if (!data) return
+            res.write('data: ' + JSON.stringify(data) + '\n\n')
+          }
+          const pingInterval = setInterval(() => runPing(), 5000)
+
+          req.on('close', () => {
+            clearInterval(pingInterval)
+          })
+          // Do initial ping right after EventSource is finished being set up
+          setImmediate(() => runPing())
+          next()
         }
       }
     }
   }
 }
 
-function disposeInactiveEntries (devMiddleware, entries, lastAccessPages, maxInactiveAge) {
+function disposeInactiveEntries (
+  devMiddleware,
+  entries,
+  lastAccessPages,
+  maxInactiveAge
+) {
   const disposingPages = []
 
-  Object.keys(entries).forEach((page) => {
+  Object.keys(entries).forEach(page => {
     const { lastActiveTime, status } = entries[page]
 
     // This means this entry is currently building or just added
@@ -300,10 +376,10 @@ function disposeInactiveEntries (devMiddleware, entries, lastAccessPages, maxIna
   })
 
   if (disposingPages.length > 0) {
-    disposingPages.forEach((page) => {
+    disposingPages.forEach(page => {
       delete entries[page]
     })
-    console.log(`> Disposing inactive page(s): ${disposingPages.join(', ')}`)
+    Log.event(`disposing inactive page(s): ${disposingPages.join(', ')}`)
     devMiddleware.invalidate()
   }
 }
@@ -316,10 +392,6 @@ export function normalizePage (page) {
     return '/'
   }
   return unixPagePath.replace(/\/index$/, '')
-}
-
-function sendJson (ws, data) {
-  ws.send(JSON.stringify(data))
 }
 
 // Make sure only one invalidation happens at a time

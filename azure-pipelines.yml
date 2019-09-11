@@ -4,37 +4,33 @@ pool:
 strategy:
   maxParallel: 10
   matrix:
-    node-10:
+    node-10-1:
+      group: 1/2
       node_version: ^10.10.0
-    node-8:
+    node-10-2:
+      group: 2/2
+      node_version: ^10.10.0
+    node-8-1:
+      group: 1/2
+      node_version: ^8.12.0
+    node-8-2:
+      group: 2/2
       node_version: ^8.12.0
 
 steps:
-- task: NodeTool@0
-  inputs:
-    versionSpec: $(node_version)
-  displayName: 'Install Node.js'
+  - task: NodeTool@0
+    inputs:
+      versionSpec: $(node_version)
+    displayName: 'Install Node.js'
 
-- script: |
-    yarn install
-  displayName: 'Install dependencies'
+  - script: |
+      yarn install
+    displayName: 'Install dependencies'
 
-- script: |
-    yarn bootstrap
-  displayName: 'Lerna bootstrap'
-  
-- script: |
-    yarn test
-  displayName: 'Run tests'
+  - script: |
+      yarn check
+    displayName: 'Yarn check'
 
-- task: PublishTestResults@2
-  displayName: 'Publish Test Results'
-  inputs:
-    testResultsFiles: '**junit*.xml'
-    testRunTitle: TestRun ${{ parameters.name }} $(node_version)
-
-- task: PublishCodeCoverageResults@1
-  displayName: 'Publish code coverage results'
-  inputs: 
-    codeCoverageTool: 'cobertura'
-    summaryFileLocation: '**/coverage/cobertura-coverage.xml'
+  - script: |
+      node run-tests.js -c 2 -g $(group)
+    displayName: 'Run tests'

@@ -1,18 +1,21 @@
 /* eslint-env jest */
 /* global jasmine */
+import webdriver from 'next-webdriver'
 import { join } from 'path'
 import getPort from 'get-port'
 import clone from 'clone'
-import cheerio from 'cheerio'
 import {
   initNextServerScript,
   killApp,
   renderViaHTTP,
-  fetchViaHTTP
+  fetchViaHTTP,
+  check,
+  File
 } from 'next-test-utils'
-import webdriver from 'next-webdriver'
 
 const appDir = join(__dirname, '../')
+const indexPg = new File(join(appDir, 'pages/index.js'))
+
 let appPort
 let server
 jasmine.DEFAULT_TIMEOUT_INTERVAL = 1000 * 60 * 2
@@ -29,7 +32,12 @@ const startServer = async (optEnv = {}) => {
     optEnv
   )
 
-  server = await initNextServerScript(scriptPath, /Ready on/, env)
+  server = await initNextServerScript(
+    scriptPath,
+    /ready on/i,
+    env,
+    /ReferenceError: options is not defined/
+  )
 }
 
 describe('Custom Server', () => {
@@ -45,13 +53,19 @@ describe('Custom Server', () => {
       const normalUsage = await renderViaHTTP(appPort, '/asset')
       expect(normalUsage).not.toMatch(/127\.0\.0\.1/)
 
-      const dynamicUsage = await renderViaHTTP(appPort, '/asset?setAssetPrefix=1')
+      const dynamicUsage = await renderViaHTTP(
+        appPort,
+        '/asset?setAssetPrefix=1'
+      )
       expect(dynamicUsage).toMatch(/127\.0\.0\.1/)
     })
 
     it('should handle null assetPrefix accordingly', async () => {
-      const $normal = cheerio.load(await renderViaHTTP(appPort, '/asset?setEmptyAssetPrefix=1'))
-      expect($normal('img').attr('src')).toBe('/static/myimage.png')
+      const normalUsage = await renderViaHTTP(
+        appPort,
+        '/asset?setEmptyAssetPrefix=1'
+      )
+      expect(normalUsage).toMatch(/"\/_next/)
     })
 
     it('should set the assetPrefix to a given request', async () => {
@@ -66,32 +80,9 @@ describe('Custom Server', () => {
       }
     })
 
-    it('should support next/asset in server side', async () => {
-      const $normal = cheerio.load(await renderViaHTTP(appPort, '/asset'))
-      expect($normal('img').attr('src')).toBe('/static/myimage.png')
-
-      const $dynamic = cheerio.load(await renderViaHTTP(appPort, '/asset?setAssetPrefix=1'))
-      expect($dynamic('img').attr('src')).toBe(`http://127.0.0.1:${context.appPort}/static/myimage.png`)
-    })
-
-    it('should support next/asset in client side', async () => {
-      const browser = await webdriver(context.appPort, '/')
-      await browser
-        .elementByCss('#go-asset').click()
-        .waitForElementByCss('#asset-page')
-
-      expect(await browser.elementByCss('img').getAttribute('src'))
-        .toBe(`http://localhost:${context.appPort}/static/myimage.png`)
-      browser.close()
-
-      const browser2 = await webdriver(context.appPort, '/?setAssetPrefix=1')
-      await browser2
-        .elementByCss('#go-asset').click()
-        .waitForElementByCss('#asset-page')
-
-      expect(await browser2.elementByCss('img').getAttribute('src'))
-        .toBe(`http://127.0.0.1:${context.appPort}/static/myimage.png`)
-      browser2.close()
+    it('should render nested index', async () => {
+      const html = await renderViaHTTP(appPort, '/dashboard')
+      expect(html).toMatch(/made it to dashboard/)
     })
   })
 
@@ -112,6 +103,31 @@ describe('Custom Server', () => {
     it('response does not include etag header', async () => {
       const response = await fetchViaHTTP(appPort, '/')
       expect(response.headers.get('etag')).toBeNull()
+    })
+  })
+
+  describe('HMR with custom server', () => {
+    beforeAll(() => startServer())
+    afterAll(() => {
+      killApp(server)
+      indexPg.restore()
+    })
+
+    it('Should support HMR when rendering with /index pathname', async () => {
+      let browser
+      try {
+        browser = await webdriver(context.appPort, '/test-index-hmr')
+        const text = await browser.elementByCss('#go-asset').text()
+        expect(text).toBe('Asset')
+
+        indexPg.replace('Asset', 'Asset!!')
+
+        await check(() => browser.elementByCss('#go-asset').text(), /Asset!!/)
+      } finally {
+        if (browser) {
+          await browser.close()
+        }
+      }
     })
   })
 })
